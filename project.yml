@@ -1,4 +1,4 @@
-﻿# XcodeGen proje tanımı. GitHub Actions bunu Odak.xcodeproj'a çevirir.
+# XcodeGen proje tanımı. GitHub Actions bunu Odak.xcodeproj'a çevirir.
 # Aynı kodla iki ayrı uygulama çıkar: Instagram ve YouTube.
 name: Odak
 options:
