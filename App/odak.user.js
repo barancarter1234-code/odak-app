@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.3
+// @version      2.4
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -273,6 +273,7 @@
         if (input.parentElement) mark(input.parentElement, true);
       });
     }
+    reportInstagramProfile();
   }
 
   // ---- YouTube ----
@@ -675,6 +676,76 @@
   }
 
   setupSwipeDown();
+
+  // ---- Instagram: alttaki profil fotoğrafı = hesap değiştirme (Instagram uygulamasındaki gibi) ----
+  const IG_RESERVED = new Set(['explore', 'direct', 'reels', 'reel', 'accounts', 'stories', 'p', 'create']);
+
+  // Alt menüdeki profil fotoğrafı bağlantısı: /kullaniciadi/ ve içinde fotoğraf
+  function igProfileLink(from) {
+    const a = from instanceof Element ? from.closest('a[href]') : null;
+    if (!a || !a.querySelector('img')) return null;
+    const m = (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9._]{1,30})\/$/);
+    if (!m || IG_RESERVED.has(m[1])) return null;
+    return a.getBoundingClientRect().top > window.innerHeight - 120 ? a : null;
+  }
+
+  let lastProfileCheck = 0;
+  let lastProfileKey = '';
+
+  // Giriş yapılmış hesabı (ad + fotoğraf) uygulamaya bildir
+  function reportInstagramProfile() {
+    if (!IG || !appBridge) return;
+    const now = Date.now();
+    if (now - lastProfileCheck < 2000) return;
+    lastProfileCheck = now;
+    const link = [...document.querySelectorAll('a[href] img')].map((img) => igProfileLink(img)).find(Boolean);
+    if (!link) return;
+    // Basılı tutunca iOS menüsü ve metin seçimi çıkmasın
+    link.style.webkitTouchCallout = 'none';
+    link.style.webkitUserSelect = 'none';
+    const username = link.getAttribute('href').slice(1, -1);
+    const avatar = link.querySelector('img').src || '';
+    const key = `${username}|${avatar}`;
+    if (key === lastProfileKey) return;
+    lastProfileKey = key;
+    try { appBridge.postMessage({ type: 'igProfile', username, avatar }); } catch (_) { /* uygulama dışında */ }
+  }
+
+  function setupProfileLongPress() {
+    if (!IG || !appBridge) return;
+    let timer = 0;
+    let fired = false;
+    const cancel = () => clearTimeout(timer);
+
+    document.addEventListener('touchstart', (e) => {
+      fired = false;
+      cancel();
+      const link = igProfileLink(e.target);
+      if (!link) return;
+      link.style.webkitTouchCallout = 'none';
+      timer = setTimeout(() => {
+        fired = true;
+        try { appBridge.postMessage({ type: 'accounts' }); } catch (_) { /* uygulama dışında */ }
+      }, 450);
+    }, { capture: true, passive: true });
+    document.addEventListener('touchmove', cancel, { capture: true, passive: true });
+    document.addEventListener('touchend', cancel, { capture: true, passive: true });
+    document.addEventListener('touchcancel', cancel, { capture: true, passive: true });
+
+    // Basılı tutma menüyü açtıysa parmak kalkınca profile gitmesin
+    document.addEventListener('click', (e) => {
+      if (fired && igProfileLink(e.target)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      fired = false;
+    }, true);
+    document.addEventListener('contextmenu', (e) => {
+      if (igProfileLink(e.target)) e.preventDefault();
+    }, true);
+  }
+
+  setupProfileLongPress();
 
   function scheduleSweep() {
     if (sweepTimer) return;

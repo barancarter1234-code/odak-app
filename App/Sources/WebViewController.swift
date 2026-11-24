@@ -69,6 +69,7 @@ final class WebViewController: UIViewController {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true // kenardan kaydırarak geri
+        webView.allowsLinkPreview = false // basılı tutunca bağlantı önizlemesi açılmasın (yerli uygulama gibi)
         webView.isOpaque = false
         webView.backgroundColor = .systemBackground
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -136,6 +137,46 @@ final class WebViewController: UIViewController {
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         updateBarColors()
+    }
+
+    // MARK: Instagram hesap değiştirme
+
+    private var isInstagram: Bool {
+        startURL.host?.contains("instagram.com") ?? false
+    }
+
+    /// Profil fotoğrafına basılı tutunca açılan hesap listesi.
+    private func showAccountSheet() {
+        guard isInstagram, presentedViewController == nil else { return }
+        let manager = AccountManager.shared
+        let sheet = AccountSheetController(accounts: manager.accounts, current: manager.current)
+        sheet.onSelect = { [weak self] username in self?.switchAccount(to: username) }
+        sheet.onAdd = { [weak self] in self?.addAccount() }
+        sheet.onRemove = { username in manager.remove(username: username) }
+
+        let navigation = UINavigationController(rootViewController: sheet)
+        if let presentation = navigation.sheetPresentationController {
+            presentation.detents = [.medium(), .large()]
+            presentation.prefersGrabberVisible = true
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        present(navigation, animated: true)
+    }
+
+    private func switchAccount(to username: String) {
+        let cookies = webView.configuration.websiteDataStore.httpCookieStore
+        AccountManager.shared.switchAccount(to: username, cookieStore: cookies) { [weak self] in
+            guard let url = URL(string: "https://www.instagram.com/") else { return }
+            self?.webView.load(URLRequest(url: url))
+        }
+    }
+
+    private func addAccount() {
+        let cookies = webView.configuration.websiteDataStore.httpCookieStore
+        AccountManager.shared.prepareNewLogin(cookieStore: cookies) { [weak self] in
+            guard let url = URL(string: "https://www.instagram.com/accounts/login/") else { return }
+            self?.webView.load(URLRequest(url: url))
+        }
     }
 
     // MARK: Mini oynatıcı
@@ -337,6 +378,13 @@ extension WebViewController: WKScriptMessageHandler {
             showMiniPlayer(videoID: id, time: time, title: title, playing: playing)
         case "watch":
             closeMiniPlayer()
+        case "igProfile":
+            // Instagram kullanıcı adı: harf, rakam, nokta, alt çizgi
+            guard isInstagram, let username = body["username"] as? String,
+                  username.range(of: "^[A-Za-z0-9._]{1,30}$", options: .regularExpression) != nil else { return }
+            AccountManager.shared.didSeeProfile(username: username, avatarURL: body["avatar"] as? String)
+        case "accounts":
+            showAccountSheet()
         default:
             break
         }
