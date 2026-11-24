@@ -9,7 +9,9 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Intel Mac: Apple Silicon (macos-15) makinelerinde GitHub kapasite sıkıntısı var.
+    runs-on: macos-15-intel
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
