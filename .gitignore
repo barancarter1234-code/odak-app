@@ -1,0 +1,6 @@
+build/
+out/
+Payload/
+Odak.xcodeproj/
+*.ipa
+.DS_Store

@@ -1,0 +1,48 @@
+# Her push'ta bulut Mac'inde iki uygulamayı imzasız derler ve .ipa dosyalarını
+# "odak-ipa" adlı indirilebilir paket olarak bırakır. Telefona Sideloadly ile yüklenir.
+name: iPhone uygulamalarini derle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode projesini olustur
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Derle (imzasiz)
+        run: |
+          set -euo pipefail
+          for target in Instagram YouTube; do
+            xcodebuild -project Odak.xcodeproj -target "$target" \
+              -configuration Release -sdk iphoneos -quiet \
+              SYMROOT="$PWD/build" \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              build
+          done
+
+      - name: IPA paketle
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for target in Instagram YouTube; do
+            rm -rf Payload
+            mkdir Payload
+            cp -R "build/Release-iphoneos/$target.app" Payload/
+            zip -qry "out/$target.ipa" Payload
+          done
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odak-ipa
+          path: out/*.ipa
+          retention-days: 30
