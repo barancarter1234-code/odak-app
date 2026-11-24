@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.2
+// @version      2.3
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -571,8 +571,10 @@
   const appBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.odak;
   let lastWatch = null;
 
+  let handoff = false; // video mini oynatıcıya devredildi, ikinci kez gönderme
+
   function trackWatch() {
-    if (!YT || !appBridge || location.pathname !== '/watch') return;
+    if (!YT || !appBridge || handoff || location.pathname !== '/watch') return;
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     const id = new URLSearchParams(location.search).get('v');
     if (!v || !id) return;
@@ -588,14 +590,91 @@
   function notifyApp(prevPath, path) {
     if (!YT || !appBridge) return;
     try {
-      if (path === '/watch') {
+      if (path === '/watch' && handoff) {
+        // Geri gidince önceki videoya düştük: o videoyu oynatma, ana sayfaya geç
+        const v = document.querySelector('video');
+        if (v) v.pause();
+        const home = document.querySelector('a[href="/"]');
+        if (home) home.click();
+        else location.assign('/');
+      } else if (path === '/watch') {
         appBridge.postMessage({ type: 'watch' });
+      } else if (prevPath === '/watch' && handoff) {
+        handoff = false; // aşağı kaydırmada zaten gönderildi
       } else if (prevPath === '/watch' && lastWatch && !lastWatch.ended && lastWatch.time > 1) {
         appBridge.postMessage({ type: 'mini', ...lastWatch });
         lastWatch = null;
       }
     } catch (_) { /* uygulama dışında */ }
   }
+
+  // ---- Videoyu aşağı kaydırınca mini oynatıcıya geç (YouTube uygulamasındaki gibi) ----
+  function minimizeToMiniPlayer() {
+    trackWatch();
+    if (!lastWatch) return false;
+    try { appBridge.postMessage({ type: 'mini', ...lastWatch }); } catch (_) { return false; }
+    lastWatch = null;
+    handoff = true;
+    const v = document.querySelector('video');
+    if (v) v.pause(); // iki video aynı anda çalmasın
+    if (history.length > 1) history.back();
+    else location.assign('/');
+    return true;
+  }
+
+  function setupSwipeDown() {
+    if (!YT || !appBridge) return;
+    const playerBox = () => document.getElementById('player-container-id');
+    let drag = null;
+
+    const reset = (animate) => {
+      const p = playerBox();
+      if (!p) return;
+      p.style.transition = animate ? 'transform .2s, opacity .2s' : '';
+      p.style.transform = '';
+      p.style.opacity = '';
+    };
+
+    document.addEventListener('touchstart', (e) => {
+      drag = null;
+      if (location.pathname !== '/watch' || e.touches.length !== 1) return;
+      const p = playerBox();
+      if (!p || !p.contains(e.target)) return;
+      drag = { x: e.touches[0].clientX, y: e.touches[0].clientY, active: false };
+    }, { capture: true, passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      if (!drag) return;
+      const dx = e.touches[0].clientX - drag.x;
+      const dy = e.touches[0].clientY - drag.y;
+      if (!drag.active) {
+        // Karar ilk harekette verilmeli: iOS sonradan sayfa kaymasını durdurmaya izin vermez
+        if (dy > 0 && dy >= Math.abs(dx)) drag.active = true;
+        else { drag = null; return; }
+      }
+      if (e.cancelable) e.preventDefault(); // sayfa kaymasın, yenileme tetiklenmesin
+      const p = playerBox();
+      if (p) {
+        const d = Math.max(0, dy);
+        p.style.transition = 'none';
+        p.style.transformOrigin = 'bottom center';
+        p.style.transform = `translateY(${d * 0.7}px) scale(${Math.max(0.55, 1 - d / 600)})`;
+        p.style.opacity = String(Math.max(0.5, 1 - d / 500));
+      }
+    }, { capture: true, passive: false });
+
+    const finish = (e) => {
+      if (!drag || !drag.active) { drag = null; return; }
+      const dy = e.changedTouches[0].clientY - drag.y;
+      drag = null;
+      if (dy > 80 && minimizeToMiniPlayer()) setTimeout(() => reset(false), 600);
+      else reset(true);
+    };
+    document.addEventListener('touchend', finish, { capture: true, passive: true });
+    document.addEventListener('touchcancel', () => { drag = null; reset(true); }, { capture: true, passive: true });
+  }
+
+  setupSwipeDown();
 
   function scheduleSweep() {
     if (sweepTimer) return;
