@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.1
+// @version      2.2
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -35,6 +35,7 @@
     { key: 'home', label: 'Ana sayfa önerilerini gizle', hint: 'Arama ve abonelikler kalır', def: false },
     { key: 'related', label: 'İzlerken önerileri gizle', hint: 'Videonun altındaki ve sonundaki öneriler', def: false },
     { key: 'ads', label: 'Reklamları gizle', hint: 'Reklam alanları; atlanabilir reklamı otomatik atlar', def: true },
+    { key: 'noCaptions', label: 'Tam ekranda altyazı açılmasın', hint: 'İstersen oynatıcıdan elle açabilirsin', def: true },
   ];
 
   const STORE_KEY = 'odak-ayarlar';
@@ -548,6 +549,8 @@
     refreshPanel();
   }
 
+  let lastPath = location.pathname;
+
   function route() {
     if (redirecting) return;
     lastHref = location.href;
@@ -557,8 +560,41 @@
       location.replace(redirectTarget(path));
       return;
     }
+    notifyApp(lastPath, path);
+    lastPath = path;
     syncPathClasses(path);
     scheduleSweep();
+  }
+
+  // ---- Uygulamayla haberleşme (sadece Odak uygulamasında; Safari'de sessizce atlanır) ----
+  // Videodan çıkınca uygulama videoyu alttaki mini oynatıcıda sürdürür.
+  const appBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.odak;
+  let lastWatch = null;
+
+  function trackWatch() {
+    if (!YT || !appBridge || location.pathname !== '/watch') return;
+    const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+    const id = new URLSearchParams(location.search).get('v');
+    if (!v || !id) return;
+    lastWatch = {
+      id,
+      time: v.currentTime || 0,
+      playing: !v.paused && !v.ended,
+      ended: v.ended,
+      title: document.title.replace(/\s*-\s*YouTube\s*$/, ''),
+    };
+  }
+
+  function notifyApp(prevPath, path) {
+    if (!YT || !appBridge) return;
+    try {
+      if (path === '/watch') {
+        appBridge.postMessage({ type: 'watch' });
+      } else if (prevPath === '/watch' && lastWatch && !lastWatch.ended && lastWatch.time > 1) {
+        appBridge.postMessage({ type: 'mini', ...lastWatch });
+        lastWatch = null;
+      }
+    } catch (_) { /* uygulama dışında */ }
   }
 
   function scheduleSweep() {
@@ -596,10 +632,34 @@
     if (target !== '/') location.assign(target);
   }, true);
 
+  // iOS, video dili telefon dilinden farklıysa tam ekranda altyazıyı kendiliğinden açar.
+  // Tam ekrana geçerken altyazıyı kapat; sonradan oynatıcıdan elle açılabilir.
+  function captionsOff(video) {
+    for (const track of video.textTracks) {
+      if (track.kind === 'subtitles' || track.kind === 'captions') track.mode = 'disabled';
+    }
+  }
+
+  if (YT) {
+    document.addEventListener('webkitbeginfullscreen', (e) => {
+      const video = e.target;
+      if (!on('noCaptions') || !(video instanceof HTMLVideoElement)) return;
+      [0, 300, 1000].forEach((ms) => setTimeout(() => captionsOff(video), ms));
+      const onAddTrack = () => captionsOff(video);
+      video.textTracks.addEventListener('addtrack', onAddTrack);
+      video.addEventListener('webkitendfullscreen', () => {
+        video.textTracks.removeEventListener('addtrack', onAddTrack);
+      }, { once: true });
+    }, true);
+  }
+
   applySettings(true);
   new MutationObserver(scheduleSweep).observe(document.documentElement, { childList: true, subtree: true });
   // Site sayfa yenilemeden gezinir: adres değişimini ucuz bir kontrolle yakala
-  setInterval(() => { if (location.href !== lastHref) route(); }, 250);
+  setInterval(() => {
+    trackWatch(); // videodan çıkmadan hemen önceki konumu bilmek için
+    if (location.href !== lastHref) route();
+  }, 250);
   setInterval(() => {
     applySettings(false); // mola bittiyse filtreleri geri aç
     syncShield();

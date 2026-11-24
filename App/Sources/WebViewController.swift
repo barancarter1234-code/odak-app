@@ -24,14 +24,37 @@ final class WebViewController: UIViewController {
         // Siteler bizi normal mobil Safari sansın (Google girişi ve tam mobil site için)
         config.applicationNameForUserAgent = "Version/18.0 Mobile/15E148 Safari/604.1"
 
-        if let url = Bundle.main.url(forResource: "odak.user", withExtension: "js"),
-           let source = try? String(contentsOf: url, encoding: .utf8) {
-            let script = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-            config.userContentController.addUserScript(script)
-        }
-
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(nibName: nil, bundle: nil)
+        install(script: ScriptStore.current())
+        // Script'ten gelen mesajlar (mini oynatıcı için)
+        config.userContentController.add(WeakScriptMessageHandler(self), name: "odak")
+    }
+
+    private var lastUpdateCheck = Date.distantPast
+    private var miniPlayer: MiniPlayerView?
+    private var colorObservations: [NSKeyValueObservation] = []
+    private var statusBarStyle: UIStatusBarStyle = .default
+
+    override var preferredStatusBarStyle: UIStatusBarStyle { statusBarStyle }
+
+    /// Odak script'ini her sayfanın başına ekler (önceki sürümün yerine).
+    private func install(script source: String) {
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        guard !source.isEmpty else { return }
+        controller.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    }
+
+    /// GitHub'da yeni script varsa kurar ve sayfayı bir kez yeniler. En fazla 15 dakikada bir bakar.
+    @objc private func checkForScriptUpdate() {
+        guard Date().timeIntervalSince(lastUpdateCheck) > 15 * 60 else { return }
+        lastUpdateCheck = Date()
+        ScriptStore.fetchUpdate { [weak self] update in
+            guard let self = self, let update = update else { return }
+            self.install(script: update)
+            self.webView.reload()
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -64,6 +87,93 @@ final class WebViewController: UIViewController {
         ])
 
         webView.load(URLRequest(url: startURL))
+
+        // Üst ve alt şeritler sayfanın rengini alsın (siyah şerit kalmasın)
+        colorObservations = [
+            webView.observe(\.themeColor, options: [.new]) { [weak self] _, _ in self?.updateBarColors() },
+            webView.observe(\.underPageBackgroundColor, options: [.new]) { [weak self] _, _ in self?.updateBarColors() },
+        ]
+
+        checkForScriptUpdate()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(checkForScriptUpdate),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    /// Durum çubuğu ve alt şerit rengini sayfanın üst rengine eşitler.
+    private func updateBarColors() {
+        var color: UIColor = webView.underPageBackgroundColor ?? .systemBackground
+        // Sayfanın bildirdiği renk saydamsa (YouTube izleme sayfası gibi) arka plan rengini kullan
+        if let theme = webView.themeColor, alphaOf(theme) > 0.5 {
+            color = theme
+        }
+        view.backgroundColor = color
+        webView.backgroundColor = color
+        webView.scrollView.backgroundColor = color
+
+        let style: UIStatusBarStyle = luminanceOf(color) < 0.5 ? .lightContent : .darkContent
+        if style != statusBarStyle {
+            statusBarStyle = style
+            setNeedsStatusBarAppearanceUpdate()
+        }
+    }
+
+    private func components(_ color: UIColor) -> (r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return (r, g, b, a)
+    }
+
+    private func alphaOf(_ color: UIColor) -> CGFloat {
+        components(color).a
+    }
+
+    private func luminanceOf(_ color: UIColor) -> CGFloat {
+        let c = components(color)
+        return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        updateBarColors()
+    }
+
+    // MARK: Mini oynatıcı
+
+    private func showMiniPlayer(videoID: String, time: Double, title: String, playing: Bool) {
+        closeMiniPlayer()
+        let mini = MiniPlayerView(videoID: videoID, time: time, title: title, autoplay: playing)
+        mini.onClose = { [weak self] in self?.closeMiniPlayer() }
+        mini.onExpand = { [weak self] id, time in
+            guard let self = self else { return }
+            self.closeMiniPlayer()
+            if let url = URL(string: "https://m.youtube.com/watch?v=\(id)&t=\(max(0, Int(time)))s") {
+                self.webView.load(URLRequest(url: url))
+            }
+        }
+        mini.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(mini)
+        NSLayoutConstraint.activate([
+            mini.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+            mini.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            // YouTube'un alt menüsünün hemen üstü
+            mini.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -56),
+            mini.heightAnchor.constraint(equalToConstant: MiniPlayerView.height),
+        ])
+        mini.alpha = 0
+        mini.transform = CGAffineTransform(translationX: 0, y: 30)
+        UIView.animate(withDuration: 0.25) {
+            mini.alpha = 1
+            mini.transform = .identity
+        }
+        miniPlayer = mini
+    }
+
+    private func closeMiniPlayer() {
+        guard let mini = miniPlayer else { return }
+        mini.stop()
+        mini.removeFromSuperview()
+        miniPlayer = nil
     }
 
     @objc private func pullToRefresh() {
@@ -123,6 +233,7 @@ extension WebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         stopRefreshing()
+        updateBarColors()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -207,5 +318,40 @@ extension WebViewController: WKUIDelegate {
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
         decisionHandler(Self.isAllowedHost(origin.host) ? .grant : .deny)
+    }
+}
+
+// MARK: - Script mesajları
+
+extension WebViewController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        switch type {
+        case "mini":
+            // Video kimliği sadece harf, rakam, - ve _ olabilir
+            guard let id = body["id"] as? String, !id.isEmpty,
+                  id.range(of: "^[A-Za-z0-9_-]{1,20}$", options: .regularExpression) != nil else { return }
+            let time = (body["time"] as? NSNumber)?.doubleValue ?? 0
+            let title = body["title"] as? String ?? ""
+            let playing = body["playing"] as? Bool ?? true
+            showMiniPlayer(videoID: id, time: time, title: title, playing: playing)
+        case "watch":
+            closeMiniPlayer()
+        default:
+            break
+        }
+    }
+}
+
+/// Mesaj işleyicisini zayıf tutar; WKUserContentController onu güçlü tuttuğu için döngü oluşmasın.
+final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    private weak var target: WKScriptMessageHandler?
+
+    init(_ target: WKScriptMessageHandler) {
+        self.target = target
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
     }
 }
