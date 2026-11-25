@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.5
+// @version      2.6
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -26,7 +26,8 @@
     { key: 'sentReel', label: 'Gönderilen Reels açılsın', hint: "DM'den gelen tek Reels'i izle, sonrakine geçemezsin", def: true },
     { key: 'explore', label: "Keşfet'i gizle", hint: 'Arama sayfasındaki ızgara (arama kutusu kalır)', def: true },
     { key: 'search', label: 'Arama çubuğunu gizle', hint: 'Hesap arama kutusu', def: false },
-    { key: 'suggested', label: 'Sadece takip ettiklerim', hint: 'Ana sayfa "Takip edilenler" akışıyla açılır, önerilen gönderiler gizlenir', def: true },
+    // Anahtar yeni: eski kayıtlı "suggested: true" ayarı burada geçerli olmasın
+    { key: 'hideSuggested', label: 'Önerilen gönderileri gizle', hint: '"Senin için" akışı çoğunlukla önerilerden oluşur; açarsan akış boşalabilir', def: false },
     { key: 'ads', label: 'Reklamları gizle', hint: 'Sponsorlu gönderiler', def: true },
     { key: 'feed', label: 'Ana akışı tamamen gizle', hint: 'Hikayeler, DM ve profiller kalır', def: false },
   ] : [
@@ -209,8 +210,9 @@
         // DM'deki Reels bağlantıları sadece "Gönderilen Reels açılsın" açıkken görünür
         const reelLinks = on('sentReel') ? 'html:not(.odak-direct) a[href*="/reel/"]' : 'a[href*="/reel/"]';
         rules.push(`a[href*="/reels/"], ${reelLinks} ${HIDE}`);
-        // Akıştaki Reels/video gönderileri ekrana çizilmeden gizlensin (sonradan gizlenince akış zıplıyor)
-        rules.push(`html.odak-home main article:has(video), html.odak-home main article:has(a[href*="/reel/"]) ${HIDE}`);
+        // Akıştaki Reels gönderileri ilk çizimde gizlensin. Reels bağlantısı (/reel/) gönderiyle birlikte gelir;
+        // <video> ise ekrana yaklaşınca sonradan eklenir, ona göre gizlemek akışı kaydırıyordu.
+        rules.push(`html.odak-home main article:has(a[href*="/reel/"]) ${HIDE}`);
       }
       if (on('explore')) {
         rules.push(`html.odak-explore main a[href*="/p/"], html.odak-explore main a[href*="/reel/"], html.odak-explore main video ${HIDE}`);
@@ -250,12 +252,12 @@
   }
 
   function shouldHideArticle(art) {
-    if (on('reels') && art.querySelector('a[href*="/reel/"], video')) return true;
+    if (on('reels') && art.querySelector('a[href*="/reel/"]')) return true;
     const text = art.textContent;
     if (on('ads') && (text.includes('Sponsorlu') || text.includes('Sponsored')) &&
       hasLeafText(art, 'span, a', AD_WORDS)) return true;
     // Takip etmediğin hesabın gönderisinde "Takip Et" düğmesi olur
-    if (on('suggested') && (text.includes('Takip Et') || text.includes('Follow')) &&
+    if (on('hideSuggested') && (text.includes('Takip Et') || text.includes('Follow')) &&
       [...art.querySelectorAll('button, [role="button"]')].some((b) => FOLLOW_WORDS.has(b.textContent.trim()))) return true;
     return false;
   }
@@ -267,11 +269,7 @@
         if (art.hasAttribute(HIDDEN_ATTR)) return;
         if (now - (igChecked.get(art) || 0) < 800) return; // aynı gönderiyi sık sık tarama
         igChecked.set(art, now);
-        if (!shouldHideArticle(art)) return;
-        const box = art.getBoundingClientRect();
-        mark(art, true);
-        // Gizlenen gönderi ekranın üstünde kaldıysa sayfayı geri kaydır: içerik zıplamasın
-        if (box.bottom <= 0 && box.height > 0) window.scrollBy(0, -box.height);
+        if (shouldHideArticle(art)) mark(art, true);
       });
     }
     if (on('search')) {
@@ -567,11 +565,6 @@
       location.replace(redirectTarget(path));
       return;
     }
-    if (shouldOpenFollowingFeed(path)) {
-      redirecting = true;
-      location.replace('/?variant=following');
-      return;
-    }
     notifyApp(lastPath, path);
     lastPath = path;
     syncPathClasses(path);
@@ -758,19 +751,16 @@
 
   setupProfileLongPress();
 
-  // "Senin için" akışı neredeyse tamamen önerilerden oluşur; hepsi gizlenince ekran boş kalır.
-  // Önerileri gizleme açıksa ana sayfayı "Takip edilenler" akışında aç.
-  function shouldOpenFollowingFeed(path) {
-    if (!IG || path !== '/' || !on('suggested')) return false;
-    if (new URLSearchParams(location.search).get('variant') === 'following') return false;
-    // Instagram parametreyi silerse sonsuz yenileme olmasın: 20 sn'de en fazla 2 kez
-    let recent = [];
-    try { recent = JSON.parse(sessionStorage.getItem('odak-following') || '[]'); } catch (_) { /* yok */ }
-    recent = recent.filter((t) => Date.now() - t < 20000);
-    if (recent.length >= 2) return false;
-    recent.push(Date.now());
-    try { sessionStorage.setItem('odak-following', JSON.stringify(recent)); } catch (_) { /* yok */ }
-    return true;
+  // 2.5 sürümü ana sayfayı "Takip edilenler" akışına çeviriyordu; bir kez normal akışa geri dön.
+  if (IG && location.pathname === '/' &&
+      new URLSearchParams(location.search).get('variant') === 'following') {
+    let undone = false;
+    try { undone = localStorage.getItem('odak-following-undone') === '1'; } catch (_) { /* yok */ }
+    if (!undone) {
+      try { localStorage.setItem('odak-following-undone', '1'); } catch (_) { /* yok */ }
+      redirecting = true;
+      location.replace('/');
+    }
   }
 
   // Bir sonraki ekran çiziminden hemen önce tara: gizlenecekler hiç görünmesin
