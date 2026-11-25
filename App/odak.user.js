@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.7
+// @version      2.8
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -68,6 +68,130 @@
   const isPaused = () => state.pauseUntil > Date.now();
   // Mola sırasında tüm filtreler kapalı sayılır.
   const on = (key) => !isPaused() && !!state.opts[key];
+
+  const SCRIPT_VERSION = '2.8'; // başlıktaki @version ile aynı tut
+
+  // ===================== Instagram: Reels'i sunucu cevabından çıkar =====================
+  // Akış, Instagram sunucusundan JSON olarak gelir. Reels'i sayfaya girmeden listeden çıkarırsak
+  // Instagram onları hiç çizmez: akış kaymaz, takılmaz, boşluk kalmaz.
+  // Sadece uygulamada işe yarar (Safari eklentisi sayfanın kendi fetch'ine erişemez); orada ve
+  // bu filtrenin kaçırdıklarında aşağıdaki sayfa içi gizleme devreye girer.
+  const apiStats = { removed: 0, responses: 0 };
+  const FEED_HINTS = ['feed__timeline', 'feed/timeline', 'timeline_feed', 'feed_timeline'];
+  const API_URL = /graphql|\/api\/v1\//;
+
+  function isReelMedia(m) {
+    return !!m && typeof m === 'object' && (m.product_type === 'clips' || m.product_type === 'igtv');
+  }
+
+  function isReelItem(x) {
+    if (!x || typeof x !== 'object') return false;
+    if (isReelMedia(x.media)) return true;
+    const node = x.node;
+    return !!node && typeof node === 'object' && (isReelMedia(node.media) || isReelMedia(node));
+  }
+
+  function stripReels(value) {
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) {
+        if (isReelItem(value[i])) {
+          value.splice(i, 1);
+          apiStats.removed++;
+        } else {
+          stripReels(value[i]);
+        }
+      }
+    } else if (value && typeof value === 'object') {
+      Object.keys(value).forEach((k) => stripReels(value[k]));
+    }
+    return value;
+  }
+
+  function isFeedResponse(url, text) {
+    if (!IG || !on('reels') || typeof text !== 'string' || !text.includes('"clips"')) return false;
+    return FEED_HINTS.some((h) => String(url || '').includes(h) || text.includes(h));
+  }
+
+  // JSON metnini filtreler; değişiklik yoksa aynı metni döndürür.
+  function filterFeedText(url, text) {
+    if (!isFeedResponse(url, text)) return text;
+    const prefix = text.startsWith('for (;;);') ? 'for (;;);' : '';
+    const body = text.slice(prefix.length);
+    const before = apiStats.removed;
+    let out;
+    try {
+      out = JSON.stringify(stripReels(JSON.parse(body)));
+    } catch (_) {
+      // Bazı cevaplar satır satır birden çok JSON içerir
+      out = body.split('\n').map((line) => {
+        if (!line.trim()) return line;
+        try { return JSON.stringify(stripReels(JSON.parse(line))); } catch (e) { return line; }
+      }).join('\n');
+    }
+    if (apiStats.removed === before) return text;
+    apiStats.responses++;
+    return prefix + out;
+  }
+
+  if (IG && typeof window.fetch === 'function') {
+    const originalFetch = window.fetch;
+    window.fetch = async function odakFetch(input) {
+      const response = await originalFetch.apply(this, arguments);
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const type = response.headers.get('content-type') || '';
+        if (!on('reels') || !API_URL.test(url) || !/json|javascript|text\/plain/.test(type)) return response;
+        const text = await response.clone().text();
+        const filtered = filterFeedText(url, text);
+        if (filtered === text) return response;
+        return new Response(filtered, { status: response.status, statusText: response.statusText, headers: response.headers });
+      } catch (_) {
+        return response;
+      }
+    };
+  }
+
+  if (IG && window.XMLHttpRequest) {
+    const proto = XMLHttpRequest.prototype;
+    const originalOpen = proto.open;
+    proto.open = function odakOpen(method, url) {
+      this.odakUrl = String(url || '');
+      return originalOpen.apply(this, arguments);
+    };
+    const textGetter = Object.getOwnPropertyDescriptor(proto, 'responseText');
+    const responseGetter = Object.getOwnPropertyDescriptor(proto, 'response');
+    const filteredText = (xhr, raw) => {
+      if (xhr.readyState !== 4 || typeof raw !== 'string' || !API_URL.test(xhr.odakUrl || '')) return raw;
+      if (xhr.odakRaw !== raw) {
+        xhr.odakRaw = raw;
+        xhr.odakOut = filterFeedText(xhr.odakUrl, raw);
+      }
+      return xhr.odakOut;
+    };
+    if (textGetter && textGetter.get) {
+      Object.defineProperty(proto, 'responseText', {
+        configurable: true,
+        enumerable: textGetter.enumerable,
+        get() { return filteredText(this, textGetter.get.call(this)); },
+      });
+    }
+    if (responseGetter && responseGetter.get) {
+      Object.defineProperty(proto, 'response', {
+        configurable: true,
+        enumerable: responseGetter.enumerable,
+        get() {
+          const raw = responseGetter.get.call(this);
+          if (typeof raw === 'string') return filteredText(this, raw);
+          if (raw && typeof raw === 'object' && this.responseType === 'json' && this.readyState === 4 &&
+              !this.odakJsonDone && API_URL.test(this.odakUrl || '')) {
+            this.odakJsonDone = true;
+            try { if (isFeedResponse(this.odakUrl, JSON.stringify(raw))) stripReels(raw); } catch (_) { /* yok */ }
+          }
+          return raw;
+        },
+      });
+    }
+  }
 
   // ===================== Yardımcılar =====================
   const pad = (n) => String(n).padStart(2, '0');
@@ -371,7 +495,7 @@
     .btn { display: block; width: 100%; margin-top: 8px; padding: 11px 12px; border: 0; border-radius: 10px;
       background: #f0f0f0; color: inherit; font-size: 15px; text-align: left; }
     .btn small { display: block; margin-top: 2px; font-size: 12px; color: #888; }
-    .foot { margin-top: 12px; font-size: 12px; color: #999; }
+    .foot { margin-top: 12px; font-size: 12px; color: #999; white-space: pre-line; }
     .shield { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
       gap: 10px; padding: 24px; background: #0f1115; color: #fff; text-align: center; }
     .shield.open { display: flex; }
@@ -465,7 +589,8 @@
       card.appendChild(actionButton('Videoyu PiP penceresinde aç', 'Başka uygulamaya geçince de izlemeye/dinlemeye devam et', openPip));
     }
 
-    card.appendChild(el('div', { class: 'foot', text: 'Ayarlar sadece bu sitede geçerli.' }));
+    const foot = el('div', { class: 'foot' });
+    card.appendChild(foot);
 
     const sheet = el('div', { class: 'sheet' }, card);
     const shieldTitle = el('b');
@@ -478,7 +603,7 @@
     endPause.addEventListener('click', () => { state.pauseUntil = 0; saveState(); applySettings(); });
 
     root.append(tab, sheet, shield);
-    ui = { host, tab, sheet, stat, notice, noticeText, shield, shieldTitle, shieldText };
+    ui = { host, tab, sheet, stat, notice, noticeText, shield, shieldTitle, shieldText, foot };
   }
 
   function openSheet(open) {
@@ -494,6 +619,21 @@
     ui.stat.textContent = `Bugün burada: ${duration(state.day === today() ? state.sec : 0)}`;
     ui.notice.classList.toggle('show', paused);
     if (paused) ui.noticeText.textContent = `Mola: filtreler kapalı. Bitiş: ${clock(state.pauseUntil)}`;
+    ui.foot.textContent = diagnostics();
+  }
+
+  // Sorun bildirirken ekran görüntüsü alınacak satır
+  function diagnostics() {
+    const lines = [`Odak ${SCRIPT_VERSION} · Ayarlar sadece bu sitede geçerli.`];
+    if (IG) {
+      const posts = [...document.querySelectorAll('main article')];
+      const hidden = posts.filter((a) => a.getBoundingClientRect().height <= 1).length;
+      const scroller = document.scrollingElement || document.documentElement;
+      const maxScroll = Math.max(0, Math.round(scroller.scrollHeight - window.innerHeight));
+      lines.push(`Tanı: sunucudan ${apiStats.removed} Reels çıkarıldı (${apiStats.responses} cevap) · ` +
+        `sayfada ${posts.length} gönderi, ${hidden} gizli · kaydırma ${Math.round(scroller.scrollTop)}/${maxScroll}`);
+    }
+    return lines.join('\n');
   }
 
   function ensureUI() {
