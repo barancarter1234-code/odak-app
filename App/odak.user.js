@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.9
+// @version      3.0
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -69,7 +69,7 @@
   // Mola sırasında tüm filtreler kapalı sayılır.
   const on = (key) => !isPaused() && !!state.opts[key];
 
-  const SCRIPT_VERSION = '2.9'; // başlıktaki @version ile aynı tut
+  const SCRIPT_VERSION = '3.0'; // başlıktaki @version ile aynı tut
 
   // ===================== Çökme tespiti =====================
   // Sayfa açıkken birkaç saniyede bir "yaşıyorum" işareti bırakır, düzgün kapanırken siler.
@@ -356,7 +356,9 @@
   ].join(',');
 
   function buildCss() {
-    const rules = [`[${HIDDEN_ATTR}], [${AD_ATTR}] ${HIDE}`];
+    // Gönderi (article) işaretleri sadece ana sayfa akışında geçerli: profil ızgarası da bir
+    // article içinde çizildiği için işaret her sayfada geçerli olunca profil boş kalıyordu.
+    const rules = [`[${HIDDEN_ATTR}]:not(article), [${AD_ATTR}] ${HIDE}`];
     if (IG) {
       rules.push(`html.odak-home main article[${HIDDEN_ATTR}] ${COLLAPSE}`);
       if (on('reels')) {
@@ -1034,7 +1036,22 @@
 
   applySettings(true);
   new MutationObserver(scheduleSweep).observe(document.documentElement, { childList: true, subtree: true });
-  // Site sayfa yenilemeden gezinir: adres değişimini ucuz bir kontrolle yakala
+
+  // Sayfa değişimini anında yakala (uygulamada). Gecikme olunca yeni sayfa bir an eski sayfanın
+  // kurallarıyla çiziliyordu. Safari eklentisinde bu yakalama çalışmaz; aşağıdaki kontrol yeter.
+  ['pushState', 'replaceState'].forEach((name) => {
+    const original = history[name];
+    if (typeof original !== 'function') return;
+    history[name] = function odakHistory() {
+      trackWatch(); // adres değişmeden önceki video konumu
+      const result = original.apply(this, arguments);
+      try { route(); } catch (_) { /* yok */ }
+      return result;
+    };
+  });
+  window.addEventListener('popstate', () => { try { route(); } catch (_) { /* yok */ } });
+
+  // Site sayfa yenilemeden gezinir: adres değişimini ucuz bir kontrolle de yakala
   setInterval(() => {
     trackWatch(); // videodan çıkmadan hemen önceki konumu bilmek için
     if (location.href !== lastHref) route();
