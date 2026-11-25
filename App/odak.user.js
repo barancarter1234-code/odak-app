@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.6
+// @version      2.7
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -142,6 +142,12 @@
   // ===================== Gizleme kuralları =====================
   // Sadece hızlı seçiciler: :has() yok. Kapsayıcıları JavaScript işaretler.
   const HIDE = '{ display: none !important; }';
+  // Instagram akışındaki gönderiyi kaldırmak yerine 1 piksellik görünmez çizgiye indir.
+  // Instagram yeni gönderi yüklemek için son gönderilerin ekrana girmesini bekler; tamamen
+  // kaldırılan (display: none) gönderi hiç "görünmediği" için akış duruyor, alt taraf siyah kalıyordu.
+  const COLLAPSE = '{ display: block !important; height: 1px !important; min-height: 0 !important;' +
+    ' max-height: 1px !important; overflow: hidden !important; visibility: hidden !important;' +
+    ' margin: 0 !important; padding: 0 !important; border: 0 !important; }';
 
   const IG_SEARCH_INPUTS = ['placeholder^="Ara"', 'placeholder^="Search"', 'aria-label^="Ara"', 'aria-label^="Search"']
     .map((a) => `input[${a}]`).join(', ');
@@ -206,13 +212,14 @@
   function buildCss() {
     const rules = [`[${HIDDEN_ATTR}], [${AD_ATTR}] ${HIDE}`];
     if (IG) {
+      rules.push(`html.odak-home main article[${HIDDEN_ATTR}] ${COLLAPSE}`);
       if (on('reels')) {
         // DM'deki Reels bağlantıları sadece "Gönderilen Reels açılsın" açıkken görünür
         const reelLinks = on('sentReel') ? 'html:not(.odak-direct) a[href*="/reel/"]' : 'a[href*="/reel/"]';
         rules.push(`a[href*="/reels/"], ${reelLinks} ${HIDE}`);
         // Akıştaki Reels gönderileri ilk çizimde gizlensin. Reels bağlantısı (/reel/) gönderiyle birlikte gelir;
         // <video> ise ekrana yaklaşınca sonradan eklenir, ona göre gizlemek akışı kaydırıyordu.
-        rules.push(`html.odak-home main article:has(a[href*="/reel/"]) ${HIDE}`);
+        rules.push(`html.odak-home main article:has(a[href*="/reel/"]) ${COLLAPSE}`);
       }
       if (on('explore')) {
         rules.push(`html.odak-explore main a[href*="/p/"], html.odak-explore main a[href*="/reel/"], html.odak-explore main video ${HIDE}`);
@@ -805,6 +812,22 @@
     for (const track of video.textTracks) {
       if (track.kind === 'subtitles' || track.kind === 'captions') track.mode = 'disabled';
     }
+  }
+
+  // Instagram: 1 piksele indirilen gönderiler ekranda sayıldığı için videoları kendiliğinden başlayabilir.
+  // Gizli gönderideki video başlarsa sessize al ve durdur.
+  if (IG) {
+    document.addEventListener('play', (e) => {
+      const video = e.target;
+      if (!(video instanceof HTMLVideoElement) || location.pathname !== '/') return;
+      const art = video.closest('article');
+      if (!art) return;
+      const hidden = art.hasAttribute(HIDDEN_ATTR) || (on('reels') && art.querySelector('a[href*="/reel/"]'));
+      if (hidden) {
+        video.muted = true;
+        video.pause();
+      }
+    }, true);
   }
 
   if (YT) {
