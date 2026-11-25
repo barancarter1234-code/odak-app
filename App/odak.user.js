@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odak - Reels & Shorts Engelleyici
 // @description  Instagram ve YouTube'da Reels, Shorts, Keşfet, öneriler ve reklamları gizler. Mola, odak ve uyku modları, günlük süre sayacı. Sağ kenardaki ⚙ ile ayarlanır.
-// @version      2.8
+// @version      2.9
 // @match        *://*.instagram.com/*
 // @match        *://*.youtube.com/*
 // @run-at       document-start
@@ -69,7 +69,29 @@
   // Mola sırasında tüm filtreler kapalı sayılır.
   const on = (key) => !isPaused() && !!state.opts[key];
 
-  const SCRIPT_VERSION = '2.8'; // başlıktaki @version ile aynı tut
+  const SCRIPT_VERSION = '2.9'; // başlıktaki @version ile aynı tut
+
+  // ===================== Çökme tespiti =====================
+  // Sayfa açıkken birkaç saniyede bir "yaşıyorum" işareti bırakır, düzgün kapanırken siler.
+  // Sayfa yeniden açıldığında yeni bir işaret duruyorsa önceki sayfa çökmüş demektir
+  // (iOS bellek yetmeyince sayfayı kapatır; ekran siyah olur, uygulama sayfayı baştan açar).
+  const ALIVE_KEY = 'odak-alive';
+  const CRASH_KEY = 'odak-crashes';
+  let crashCount = 0;
+  let crashedNow = false;
+  try {
+    crashCount = Number(localStorage.getItem(CRASH_KEY)) || 0;
+    const alive = Number(localStorage.getItem(ALIVE_KEY)) || 0;
+    if (alive && Date.now() - alive < 15000) {
+      crashCount++;
+      crashedNow = true;
+      localStorage.setItem(CRASH_KEY, String(crashCount));
+    }
+  } catch (_) { /* depolama yok */ }
+  const heartbeat = () => { try { localStorage.setItem(ALIVE_KEY, String(Date.now())); } catch (_) { /* yok */ } };
+  heartbeat();
+  setInterval(heartbeat, 5000);
+  window.addEventListener('pagehide', () => { try { localStorage.removeItem(ALIVE_KEY); } catch (_) { /* yok */ } });
 
   // ===================== Instagram: Reels'i sunucu cevabından çıkar =====================
   // Akış, Instagram sunucusundan JSON olarak gelir. Reels'i sayfaya girmeden listeden çıkarırsak
@@ -408,6 +430,16 @@
         if (input.parentElement) mark(input.parentElement, true);
       });
     }
+    // Gizli gönderilerdeki videoları boşalt: görünmeseler de yüklenip bellek yiyorlardı
+    document.querySelectorAll(`main article[${HIDDEN_ATTR}] video:not([data-odak-bos])`).forEach((v) => {
+      v.setAttribute('data-odak-bos', '');
+      try {
+        v.muted = true;
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+      } catch (_) { /* yok */ }
+    });
     reportInstagramProfile();
   }
 
@@ -501,6 +533,9 @@
     .shield.open { display: flex; }
     .shield b { font-size: 26px; }
     .shield p { margin: 0; max-width: 320px; color: #b8bcc6; font-size: 16px; }
+    .toast { position: fixed; left: 12px; right: 12px; top: calc(12px + env(safe-area-inset-top)); padding: 12px 14px;
+      border-radius: 12px; background: rgba(30,30,30,.95); color: #fff; font-size: 14px; line-height: 1.35;
+      box-shadow: 0 4px 16px rgba(0,0,0,.3); transition: opacity .3s; }
     @media (prefers-color-scheme: dark) {
       .card { background: #1c1c1e; color: #f2f2f2; }
       .row { border-color: rgba(255,255,255,.1); }
@@ -624,7 +659,7 @@
 
   // Sorun bildirirken ekran görüntüsü alınacak satır
   function diagnostics() {
-    const lines = [`Odak ${SCRIPT_VERSION} · Ayarlar sadece bu sitede geçerli.`];
+    const lines = [`Odak ${SCRIPT_VERSION} · çökme: ${crashCount} · Ayarlar sadece bu sitede geçerli.`];
     if (IG) {
       const posts = [...document.querySelectorAll('main article')];
       const hidden = posts.filter((a) => a.getBoundingClientRect().height <= 1).length;
@@ -638,8 +673,22 @@
 
   function ensureUI() {
     if (!document.body) return;
-    if (!ui) { buildUI(); syncShield(); }
+    if (!ui) {
+      buildUI();
+      syncShield();
+      if (crashedNow) {
+        showToast(`Sayfa bellek yetmediği için kapandı ve baştan açıldı (${crashCount}. kez). ` +
+          'Bunu görürsen ⚙ menüsünün altının ekran görüntüsünü at.');
+      }
+    }
     if (!ui.host.isConnected) document.body.appendChild(ui.host);
+  }
+
+  function showToast(text) {
+    const toast = el('div', { class: 'toast', text });
+    ui.host.shadowRoot.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; }, 6000);
+    setTimeout(() => toast.remove(), 6500);
   }
 
   function syncShield() {
